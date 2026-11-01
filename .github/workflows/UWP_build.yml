@@ -23,6 +23,19 @@ jobs:
       - name: Submodules
         run: git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS (Select-String -CaseSensitive '(?<=path = )(?!third_party\/(FidelityFX-(CAS|FSR)|premake-(androidndk|cmake|export-compile-commands))).+' .gitmodules).Matches.Value
 
+      # The pinned premake-core is from 2017, but FFmpeg's premake5.lua needs
+      # linktimeoptimization (premake 5.0.0-beta4+). xenia-build.py passes
+      # --scripts=third_party/premake-core, so the scripts and the binary both
+      # have to be the newer version.
+      - name: Premake 5.0.0-beta8
+        run: |
+          git -C third_party\premake-core fetch --depth=1 origin tag v5.0.0-beta8
+          git -C third_party\premake-core checkout --quiet v5.0.0-beta8
+          Invoke-WebRequest https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip -OutFile premake.zip
+          if ((Get-FileHash premake.zip -Algorithm SHA256).Hash -ne 'E64CE2ED8778E0098F63674CCA61FE33941B5F0C8D9A4AFD651152BDEA3758AB') { throw "premake download checksum mismatch" }
+          Expand-Archive premake.zip -DestinationPath third_party\premake-core\bin\release -Force
+          Get-ChildItem third_party\premake-core\bin\release
+
       - name: Premake
         run: python xenia-build.py premake
 
