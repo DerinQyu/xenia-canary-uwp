@@ -1,0 +1,59 @@
+name: Xbox UWP build
+
+# Builds the Xbox Dev Mode (UWP) package, including PR #5's structured
+# forward jumps, signed with a throwaway certificate for sideloading.
+
+on:
+  push:
+    branches: [harms-way-fix]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build UWP package
+    runs-on: windows-2022
+    timeout-minutes: 240
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Submodules
+        run: git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS (Select-String -CaseSensitive '(?<=path = )(?!third_party\/(FidelityFX-(CAS|FSR)|premake-(androidndk|cmake|export-compile-commands))).+' .gitmodules).Matches.Value
+
+      - name: Premake
+        run: python xenia-build.py premake
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Restore C++/WinRT
+        run: nuget restore xenia-canary-uwp\packages.config -PackagesDirectory build\packages
+
+      - name: Signing certificate
+        run: |
+          $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=XeniaUWPFix" -KeyUsage DigitalSignature `
+            -FriendlyName "Xenia UWP fix (sideload only)" -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          $password = ConvertTo-SecureString -String "xenia123" -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath xenia-canary-uwp\XeniaDevCert.pfx -Password $password | Out-Null
+          "CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: >
+          msbuild xenia-canary-uwp\xenia-canary-uwp.vcxproj /m /v:minimal
+          /p:Configuration=Release /p:Platform=x64
+          /p:SolutionDir=$env:GITHUB_WORKSPACE\build\
+          /p:AppxBundle=Always /p:AppxBundlePlatforms=x64
+          /p:UapAppxPackageBuildMode=SideloadOnly
+          /p:AppxPackageDir=$env:GITHUB_WORKSPACE\out\
+          /p:PackageCertificateKeyFile=XeniaDevCert.pfx
+          /p:PackageCertificatePassword=xenia123
+          /p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xenia-canary-uwp-jump-fix
+          path: out\**
+          if-no-files-found: error
