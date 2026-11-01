@@ -24,15 +24,16 @@ jobs:
         run: git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS (Select-String -CaseSensitive '(?<=path = )(?!third_party\/(FidelityFX-(CAS|FSR)|premake-(androidndk|cmake|export-compile-commands))).+' .gitmodules).Matches.Value
 
       # The pinned premake-core is from 2017, but FFmpeg's premake5.lua needs
-      # linktimeoptimization (premake 5.0.0-beta4+). xenia-build.py passes
+      # linktimeoptimization (premake 5.0.0-beta4+), and premake5.lua still uses the
+      # FatalWarnings flag that beta8 removed, so beta7 is the newest that fits. xenia-build.py passes
       # --scripts=third_party/premake-core, so the scripts and the binary both
       # have to be the newer version.
-      - name: Premake 5.0.0-beta8
+      - name: Premake 5.0.0-beta7
         run: |
-          git -C third_party\premake-core fetch --depth=1 origin tag v5.0.0-beta8
-          git -C third_party\premake-core checkout --quiet v5.0.0-beta8
-          Invoke-WebRequest https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip -OutFile premake.zip
-          if ((Get-FileHash premake.zip -Algorithm SHA256).Hash -ne 'E64CE2ED8778E0098F63674CCA61FE33941B5F0C8D9A4AFD651152BDEA3758AB') { throw "premake download checksum mismatch" }
+          git -C third_party\premake-core fetch --depth=1 origin tag v5.0.0-beta7
+          git -C third_party\premake-core checkout --quiet v5.0.0-beta7
+          Invoke-WebRequest https://github.com/premake/premake-core/releases/download/v5.0.0-beta7/premake-5.0.0-beta7-windows.zip -OutFile premake.zip
+          if ((Get-FileHash premake.zip -Algorithm SHA256).Hash -ne '8BAEC7B265FD43050F006EF47000457FA93B6FAFBB1EAD7E333E862A467C2E95') { throw "premake download checksum mismatch" }
           Expand-Archive premake.zip -DestinationPath third_party\premake-core\bin\release -Force
           Get-ChildItem third_party\premake-core\bin\release
 
