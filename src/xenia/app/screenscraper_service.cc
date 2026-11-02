@@ -629,6 +629,13 @@ std::filesystem::path FindDisplayMedia(const Configuration& config,
     legacy.directory_as_file = true;
     path = FindExistingMedia(config, legacy, type);
   }
+  // Media put straight in the type's folder under the game's own name, without
+  // the folders the game sits in (a GOD game is three folders deep).
+  if (path.empty() && target.relative_game_path.has_parent_path()) {
+    auto flat = target;
+    flat.relative_game_path = target.relative_game_path.filename();
+    path = FindExistingMedia(config, flat, type);
+  }
   return path;
 }
 bool UpdateGameList(const Configuration& config, const Target& target,
