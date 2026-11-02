@@ -119,6 +119,11 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out);
 // Whether the host page holding the address has memory committed (always on
 // POSIX, where mapped memory needs no commit).
 bool IsCommitted(const void* address);
+// How many bytes of a page aligned range have memory committed (0 on POSIX,
+// which doesn't track it). Takes no locks. In a range split into very many
+// regions it stops early, to stay quick, and sets *complete to false.
+size_t CountCommittedBytes(const void* base_address, size_t length,
+                           bool* complete = nullptr);
 
 // Allocates a block of memory for a type with the given alignment.
 // The memory must be freed with AlignedFree.

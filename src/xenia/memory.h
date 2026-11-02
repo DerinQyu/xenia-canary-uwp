@@ -26,6 +26,9 @@
 namespace xe {
 class ByteStream;
 class Exception;
+namespace crash_report {
+class Writer;
+}  // namespace crash_report
 }  // namespace xe
 
 namespace xe {
@@ -660,6 +663,9 @@ class Memory {
 
   int MapViews(uint8_t* mapping_base);
   void UnmapViews();
+  // The host memory committed for the guest, in the shared mapping and in
+  // private memory, for heartbeats and crash reports.
+  static void DescribeStatusThunk(void* context, crash_report::Writer& out);
 
   static uint32_t HostToGuestVirtualThunk(const void* context,
                                           const void* host_address);
@@ -697,6 +703,9 @@ class Memory {
     };
     uint8_t* all_views[9];
   } views_ = {{0}};
+  // Views that are private memory rather than views of mapping_ (bit n for
+  // all_views[n]), see private_guest_virtual_memory.
+  uint32_t private_view_mask_ = 0;
 
   std::unique_ptr<cpu::MMIOHandler> mmio_handler_;
 

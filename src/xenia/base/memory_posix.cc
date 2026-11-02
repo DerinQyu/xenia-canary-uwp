@@ -239,6 +239,13 @@ bool Protect(void* base_address, size_t length, PageAccess access,
 
 bool IsCommitted(const void*) { return true; }
 
+size_t CountCommittedBytes(const void*, size_t, bool* complete) {
+  if (complete) {
+    *complete = true;
+  }
+  return 0;
+}
+
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
   // No generic POSIX solution exists. The Linux solution should work on all
   // Linux kernel based OS, including Android.

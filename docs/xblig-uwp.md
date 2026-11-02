@@ -85,7 +85,13 @@ Config:
   the GPU or a game first touches one no game allocated, instead of taking
   all 512 MiB at start. Translated code is kept in private memory there,
   which that limit does not cover (`Code cache: 16 MiB of private memory`
-  in the log; a mapping as before if the system refuses).
+  in the log; a mapping as before if the system refuses). So is the guest's
+  virtual memory below 0x7F000000, its ordinary heaps and thread stacks
+  (`private_guest_virtual_memory`, on by default on the Xbox): only guest
+  physical memory and XEX images, which other views show, stay in the
+  mapping. Heartbeats and crash reports say how much guest memory comes
+  from each (`guest memory ... MiB from the shared mapping, ... MiB
+  private`).
 
 ## Building
 

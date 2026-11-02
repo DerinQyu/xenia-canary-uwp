@@ -57,6 +57,17 @@ DEFINE_bool(commit_all_physical_memory, !XE_PLATFORM_WINRT,
             "use hundreds of MiB less. Off by default on the Xbox.",
             "Memory");
 UPDATE_from_bool(commit_all_physical_memory, 2026, 10, 30, 5, true);
+// That limit covers memory committed in the shared mapping, not private
+// memory: Worms Revolution ran out of guest memory at 1.8 GB of process commit
+// with 3.3 GB more available. Guest memory below 0x7F000000 is shown by no
+// other view, so it doesn't need the mapping.
+DEFINE_bool(private_guest_virtual_memory, XE_PLATFORM_WINRT,
+            "Give the guest's virtual memory below 0x7F000000 (its ordinary "
+            "heaps and thread stacks) private host memory instead of memory "
+            "from the shared mapping, which the Xbox stops giving out at "
+            "about 700 MiB. Physical and XEX image memory stay in the mapping, "
+            "where other views show them. On by default on the Xbox.",
+            "Memory");
 DEFINE_bool(scribble_heap, false,
             "Scribble specific or random value into all allocated heap memory.",
             "Memory");
@@ -182,6 +193,9 @@ Memory::~Memory() {
   // Uninstall the MMIO handler, as we won't be able to service more
   // requests.
   mmio_handler_.reset();
+#if XE_PLATFORM_WIN32
+  crash_report::RemoveStatusSource(DescribeStatusThunk, this);
+#endif
 
   ExceptionHandler::Uninstall(AliasSpaceExceptionCallbackThunk, this);
   if (uint8_t* alias_base = alias_membase_.exchange(nullptr)) {
@@ -252,6 +266,14 @@ bool Memory::Initialize() {
   }
   virtual_membase_ = mapping_base_;
   physical_membase_ = mapping_base_ + 0x100000000ull;
+  if (private_view_mask_) {
+    XELOGI(
+        "Memory: guest virtual memory below 0x7F000000 is private host memory "
+        "(private_guest_virtual_memory is on)");
+  }
+#if XE_PLATFORM_WIN32
+  crash_report::AddStatusSource(DescribeStatusThunk, this);
+#endif
 
   // Prepare virtual heaps.
   heaps_.v00000000.Initialize(this, virtual_membase_, HeapType::kGuestVirtual,
@@ -417,17 +439,36 @@ static const struct {
         0x0000000100000000ull,
     },
 };
+// The views of 0x00000000 and 0x40000000, the only ones whose memory no other
+// view shows.
+constexpr uint32_t kPrivateCapableViewMask = 0b11;
+
 int Memory::MapViews(uint8_t* mapping_base) {
   assert_true(xe::countof(map_info) == xe::countof(views_.all_views));
   // 0xE0000000 4 KB offset is emulated via host_address_offset and on the CPU
   // side if system allocation granularity is bigger than 4 KB.
   uint64_t granularity_mask = ~uint64_t(system_allocation_granularity_ - 1);
+  const uint32_t private_mask =
+      cvars::private_guest_virtual_memory ? kPrivateCapableViewMask : 0;
   for (size_t n = 0; n < xe::countof(map_info); n++) {
-    views_.all_views[n] = reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
-        mapping_, mapping_base + map_info[n].virtual_address_start,
-        map_info[n].virtual_address_end - map_info[n].virtual_address_start + 1,
-        xe::memory::PageAccess::kReadWrite,
-        map_info[n].target_address & granularity_mask));
+    uint8_t* const address = mapping_base + map_info[n].virtual_address_start;
+    const size_t length =
+        map_info[n].virtual_address_end - map_info[n].virtual_address_start + 1;
+    if (private_mask & (1u << n)) {
+      // Reserved only: the heaps commit what the guest allocates, as they do
+      // in a view of the mapping.
+      views_.all_views[n] = static_cast<uint8_t*>(
+          xe::memory::AllocFixed(address, length,
+                                 xe::memory::AllocationType::kReserve,
+                                 xe::memory::PageAccess::kReadWrite));
+      if (views_.all_views[n]) {
+        private_view_mask_ |= 1u << n;
+      }
+    } else {
+      views_.all_views[n] = reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
+          mapping_, address, length, xe::memory::PageAccess::kReadWrite,
+          map_info[n].target_address & granularity_mask));
+    }
     if (!views_.all_views[n]) {
       // Failed, so bail and try again.
       UnmapViews();
@@ -440,10 +481,54 @@ int Memory::MapViews(uint8_t* mapping_base) {
 void Memory::UnmapViews() {
   for (size_t n = 0; n < xe::countof(views_.all_views); n++) {
     if (views_.all_views[n]) {
-      size_t length = map_info[n].virtual_address_end -
-                      map_info[n].virtual_address_start + 1;
-      xe::memory::UnmapFileView(mapping_, views_.all_views[n], length);
+      if (private_view_mask_ & (1u << n)) {
+        xe::memory::DeallocFixed(views_.all_views[n], 0,
+                                 xe::memory::DeallocationType::kRelease);
+      } else {
+        size_t length = map_info[n].virtual_address_end -
+                        map_info[n].virtual_address_start + 1;
+        xe::memory::UnmapFileView(mapping_, views_.all_views[n], length);
+      }
+      views_.all_views[n] = nullptr;
     }
+  }
+  private_view_mask_ = 0;
+}
+
+void Memory::DescribeStatusThunk(void* context, crash_report::Writer& out) {
+  auto memory = static_cast<const Memory*>(context);
+  size_t shared = 0;
+  size_t private_bytes = 0;
+  bool all_counted = true;
+  for (size_t n = 0; n < xe::countof(map_info); n++) {
+    // Guest physical memory shows in five views and 0x90000000 shows the
+    // memory of 0x80000000, so count each once: in the raw physical view and
+    // in 0x80000000.
+    if (n == 2 || n == 4 || n == 5 || n == 6 || n == 7) {
+      continue;
+    }
+    const uint8_t* view = memory->views_.all_views[n];
+    if (!view) {
+      continue;
+    }
+    bool complete;
+    const size_t committed = xe::memory::CountCommittedBytes(
+        view,
+        map_info[n].virtual_address_end - map_info[n].virtual_address_start + 1,
+        &complete);
+    all_counted &= complete;
+    if (memory->private_view_mask_ & (1u << n)) {
+      private_bytes += committed;
+    } else {
+      shared += committed;
+    }
+  }
+  out.Append("guest memory {} MiB from the shared mapping", shared >> 20);
+  if (memory->private_view_mask_) {
+    out.Append(", {} MiB private", private_bytes >> 20);
+  }
+  if (!all_counted) {
+    out.AppendText(" (partly counted)");
   }
 }
 
@@ -501,6 +586,10 @@ bool Memory::GetBackingOffset(const AliasSpacePage& page,
   for (size_t n = 0; n + 1 < xe::countof(map_info); n++) {
     if (source >= map_info[n].virtual_address_start &&
         source <= map_info[n].virtual_address_end) {
+      if (private_view_mask_ & (1u << n)) {
+        // Private memory has no offset in the mapping to show it from.
+        return false;
+      }
       *out_offset = (map_info[n].target_address & granularity_mask) +
                     uint64_t(host - views_.all_views[n]);
       return true;

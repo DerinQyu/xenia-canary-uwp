@@ -9,6 +9,7 @@
 
 #include "xenia/base/memory.h"
 
+#include <algorithm>
 #include <atomic>
 
 #include "xenia/base/crash_report.h"
@@ -295,6 +296,40 @@ bool IsCommitted(const void* address) {
   MEMORY_BASIC_INFORMATION info = {};
   return VirtualQuery(address, &info, sizeof(info)) != 0 &&
          info.State == MEM_COMMIT;
+}
+
+size_t CountCommittedBytes(const void* base_address, size_t length,
+                           bool* complete) {
+  // Each region costs a system call; this many takes some milliseconds.
+  constexpr uint32_t kMaxRegions = 16384;
+  if (complete) {
+    *complete = true;
+  }
+  auto address = static_cast<const uint8_t*>(base_address);
+  const uint8_t* const end = address + length;
+  size_t committed = 0;
+  for (uint32_t regions = 0; address < end; ++regions) {
+    if (regions == kMaxRegions) {
+      if (complete) {
+        *complete = false;
+      }
+      break;
+    }
+    MEMORY_BASIC_INFORMATION info = {};
+    if (!VirtualQuery(address, &info, sizeof(info))) {
+      break;
+    }
+    const uint8_t* const region_end =
+        static_cast<const uint8_t*>(info.BaseAddress) + info.RegionSize;
+    if (region_end <= address) {
+      break;
+    }
+    if (info.State == MEM_COMMIT) {
+      committed += size_t(std::min(region_end, end) - address);
+    }
+    address = region_end;
+  }
+  return committed;
 }
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
