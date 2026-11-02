@@ -4738,7 +4738,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
             auto cached_title_id = cached_game_title_ids_.find(row.path);
             if (cached_title_id == cached_game_title_ids_.end()) {
-              std::string title_id = UWP::GetTitleIdFromPath(row.path);
+              std::string title_id = UWP::GetMetadataTitleIdFromPath(row.path);
               cached_game_title_ids_.insert({row.path, title_id});
               row.title_id = std::move(title_id);
             } else {

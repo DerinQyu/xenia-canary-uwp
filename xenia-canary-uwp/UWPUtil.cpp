@@ -12,6 +12,7 @@
 #include "xenia/cpu/xex_module.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/util/xex2_info.h"
+#include "xenia/kernel/util/xna_game_info.h"
 #include "xenia/kernel/xam/xcontent/xcontent_package_container.h"
 #include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/entry.h"
@@ -728,6 +729,54 @@ std::string UWP::GetTitleIdFromPath(const std::string& game_path) {
   return GetTitleAndMediaFromPath(game_path, nullptr);
 }
 
+// Indie game packages are content of the XNA launcher, 584E07D2; each game's
+// own title ID is in the package's GameInfo.bin.
+static uint32_t ReadIndieGameTitleId(const std::filesystem::path& path) {
+  try {
+    xe::vfs::VirtualFileSystem file_system;
+    xe::kernel::xam::ContentPackageContainer package(&file_system, "", path);
+    auto device = package.MountPackage();
+    if (!device || !device->Initialize()) {
+      return 0;
+    }
+    xe::vfs::Entry* entry = device->ResolvePath("GameInfo.bin");
+    if (!entry || !entry->size() || entry->size() > 64 * 1024) {
+      return 0;
+    }
+    xe::vfs::File* file = nullptr;
+    if (XFAILED(entry->Open(xe::filesystem::FileAccess::kGenericRead,
+                            &file)) ||
+        !file) {
+      return 0;
+    }
+    std::vector<uint8_t> buffer(size_t(entry->size()));
+    size_t bytes_read = 0;
+    const auto status = file->ReadSync(
+        std::span<uint8_t>(buffer.data(), buffer.size()), 0, &bytes_read);
+    file->Destroy();
+    if (XFAILED(status)) {
+      return 0;
+    }
+    buffer.resize(bytes_read);
+    const auto info = xe::kernel::util::ParseXnaGameInfo(buffer);
+    return info ? info->community_title_id : 0;
+  } catch (const std::exception& error) {
+    XELOGE("Could not read indie game info: {}", error.what());
+  }
+  return 0;
+}
+
+std::string UWP::GetMetadataTitleIdFromPath(const std::string& game_path) {
+  std::string title_id = GetTitleIdFromPath(game_path);
+  if (title_id == "584E07D2") {
+    if (const uint32_t indie_title_id =
+            ReadIndieGameTitleId(std::filesystem::u8path(game_path))) {
+      return FormatTitleId(indie_title_id);
+    }
+  }
+  return title_id;
+}
+
 std::string UWP::GetMediaIdFromPath(const std::string& game_path) {
   uint32_t media_id = 0;
   GetTitleAndMediaFromPath(game_path, &media_id);
@@ -1088,6 +1137,33 @@ static std::string PickBestCoverId(
   return best_cover_id;
 }
 
+// Saves the artwork at url to path unless path exists already. True if it
+// exists afterwards; a failed download is not an error, there is a fallback.
+static winrt::Windows::Foundation::IAsyncOperation<bool> DownloadArtworkAsync(
+    winrt::Windows::Web::Http::HttpClient client, std::string url,
+    std::filesystem::path path) {
+  if (!std::filesystem::exists(path) && !url.empty()) {
+    try {
+      auto response = co_await client.GetAsync(
+          winrt::Windows::Foundation::Uri(winrt::to_hstring(url)));
+      if (response.IsSuccessStatusCode()) {
+        auto buffer = co_await response.Content().ReadAsBufferAsync();
+        if (buffer.Length() > 0) {
+          auto reader =
+              winrt::Windows::Storage::Streams::DataReader::FromBuffer(buffer);
+          std::vector<uint8_t> bytes(buffer.Length());
+          reader.ReadBytes(winrt::array_view<uint8_t>(bytes));
+          std::ofstream file(path, std::ios::binary);
+          file.write(reinterpret_cast<const char*>(bytes.data()),
+                     std::streamsize(bytes.size()));
+        }
+      }
+    } catch (...) {
+    }
+  }
+  co_return std::filesystem::exists(path);
+}
+
 winrt::fire_and_forget FetchUnityMetadataAsync(std::string title_id) {
   const std::string normalized_title_id = NormalizeId(title_id);
   if (normalized_title_id.empty()) {
@@ -1184,118 +1260,42 @@ winrt::fire_and_forget FetchUnityMetadataAsync(std::string title_id) {
           if (root.HasKey(L"artwork")) {
             auto artwork = root.GetNamedObject(L"artwork");
 
-            std::string icon_url = JsonObjectString(artwork, L"icon");
-            if (!icon_url.empty()) {
-              auto icon_path =
-                  icons_root / fmt::format("{}.png", normalized_title_id);
-              if (!std::filesystem::exists(icon_path)) {
-                auto icon_response =
-                    co_await client.GetAsync(winrt::Windows::Foundation::Uri(
-                        winrt::to_hstring(icon_url)));
-                if (icon_response.IsSuccessStatusCode()) {
-                  auto icon_buffer =
-                      co_await icon_response.Content().ReadAsBufferAsync();
-                  if (icon_buffer.Length() > 0) {
-                    auto icon_reader = winrt::Windows::Storage::Streams::
-                        DataReader::FromBuffer(icon_buffer);
-                    std::vector<uint8_t> icon_bytes(icon_buffer.Length());
-                    icon_reader.ReadBytes(
-                        winrt::array_view<uint8_t>(icon_bytes));
-                    std::ofstream icon_ofs(icon_path, std::ios::binary);
-                    icon_ofs.write(
-                        reinterpret_cast<const char*>(icon_bytes.data()),
-                        icon_bytes.size());
-                  }
-                }
+            // The database's links can be dead (Microsoft's server for indie
+            // game artwork, for one); it keeps a copy of most of them.
+            const std::string repo_artwork = fmt::format(
+                "https://raw.githubusercontent.com/xenia-manager/x360db/main/"
+                "titles/{}/artwork/",
+                normalized_title_id);
+            const std::string file_name =
+                fmt::format("{}.png", normalized_title_id);
+            struct ArtworkKind {
+              const wchar_t* key;
+              const char* repo_file;
+              std::filesystem::path path;
+              std::string* out_path;
+            };
+            ArtworkKind artwork_kinds[] = {
+                {L"icon", "icon.png", icons_root / file_name,
+                 &metadata.icon_path},
+                {L"boxart", "boxart.jpg", covers_root / file_name,
+                 &metadata.cover_path},
+                {L"banner", "banner.png", banners_root / file_name,
+                 &metadata.banner_path},
+                {L"background", "background.jpg", backgrounds_root / file_name,
+                 &metadata.background_path},
+            };
+            for (const auto& kind : artwork_kinds) {
+              const std::string url = JsonObjectString(artwork, kind.key);
+              if (url.empty()) {
+                continue;
               }
-              if (std::filesystem::exists(icon_path)) {
-                metadata.icon_path = xe::path_to_utf8(icon_path);
+              bool saved = co_await DownloadArtworkAsync(client, url, kind.path);
+              if (!saved) {
+                saved = co_await DownloadArtworkAsync(
+                    client, repo_artwork + kind.repo_file, kind.path);
               }
-            }
-
-            std::string boxart_url = JsonObjectString(artwork, L"boxart");
-            if (!boxart_url.empty()) {
-              auto cover_path =
-                  covers_root / fmt::format("{}.png", normalized_title_id);
-              if (!std::filesystem::exists(cover_path)) {
-                auto cover_response =
-                    co_await client.GetAsync(winrt::Windows::Foundation::Uri(
-                        winrt::to_hstring(boxart_url)));
-                if (cover_response.IsSuccessStatusCode()) {
-                  auto cover_buffer =
-                      co_await cover_response.Content().ReadAsBufferAsync();
-                  if (cover_buffer.Length() > 0) {
-                    auto cover_reader = winrt::Windows::Storage::Streams::
-                        DataReader::FromBuffer(cover_buffer);
-                    std::vector<uint8_t> cover_bytes(cover_buffer.Length());
-                    cover_reader.ReadBytes(
-                        winrt::array_view<uint8_t>(cover_bytes));
-                    std::ofstream cover_ofs(cover_path, std::ios::binary);
-                    cover_ofs.write(
-                        reinterpret_cast<const char*>(cover_bytes.data()),
-                        cover_bytes.size());
-                  }
-                }
-              }
-              if (std::filesystem::exists(cover_path)) {
-                metadata.cover_path = xe::path_to_utf8(cover_path);
-              }
-            }
-
-            std::string banner_url = JsonObjectString(artwork, L"banner");
-            if (!banner_url.empty()) {
-              auto banner_path =
-                  banners_root / fmt::format("{}.png", normalized_title_id);
-              if (!std::filesystem::exists(banner_path)) {
-                auto banner_response =
-                    co_await client.GetAsync(winrt::Windows::Foundation::Uri(
-                        winrt::to_hstring(banner_url)));
-                if (banner_response.IsSuccessStatusCode()) {
-                  auto banner_buffer =
-                      co_await banner_response.Content().ReadAsBufferAsync();
-                  if (banner_buffer.Length() > 0) {
-                    auto banner_reader = winrt::Windows::Storage::Streams::
-                        DataReader::FromBuffer(banner_buffer);
-                    std::vector<uint8_t> banner_bytes(banner_buffer.Length());
-                    banner_reader.ReadBytes(
-                        winrt::array_view<uint8_t>(banner_bytes));
-                    std::ofstream banner_ofs(banner_path, std::ios::binary);
-                    banner_ofs.write(
-                        reinterpret_cast<const char*>(banner_bytes.data()),
-                        banner_bytes.size());
-                  }
-                }
-              }
-              if (std::filesystem::exists(banner_path)) {
-                metadata.banner_path = xe::path_to_utf8(banner_path);
-              }
-            }
-
-            std::string background_url =
-                JsonObjectString(artwork, L"background");
-            if (!background_url.empty()) {
-              auto background_path =
-                  backgrounds_root / fmt::format("{}.png", normalized_title_id);
-              if (!std::filesystem::exists(background_path)) {
-                auto bg_response =
-                    co_await client.GetAsync(winrt::Windows::Foundation::Uri(
-                        winrt::to_hstring(background_url)));
-                if (bg_response.IsSuccessStatusCode()) {
-                  auto bg_buffer =
-                      co_await bg_response.Content().ReadAsBufferAsync();
-                  if (bg_buffer.Length() > 0) {
-                    auto bg_reader = winrt::Windows::Storage::Streams::
-                        DataReader::FromBuffer(bg_buffer);
-                    std::vector<uint8_t> bg_bytes(bg_buffer.Length());
-                    bg_reader.ReadBytes(winrt::array_view<uint8_t>(bg_bytes));
-                    std::ofstream bg_ofs(background_path, std::ios::binary);
-                    bg_ofs.write(reinterpret_cast<const char*>(bg_bytes.data()),
-                                 bg_bytes.size());
-                  }
-                }
-              }
-              if (std::filesystem::exists(background_path)) {
-                metadata.background_path = xe::path_to_utf8(background_path);
+              if (saved) {
+                *kind.out_path = xe::path_to_utf8(kind.path);
               }
             }
 

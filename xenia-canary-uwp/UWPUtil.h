@@ -83,6 +83,9 @@ void DownloadAndExtractZip(const std::string& url,
 bool IsDownloadInProgress();
 float GetDownloadProgress();
 std::string GetTitleIdFromPath(const std::string& game_path);
+// The title ID to look a game's name and artwork up by: an indie game's own
+// one, where GetTitleIdFromPath gives the XNA launcher's (584E07D2) for all.
+std::string GetMetadataTitleIdFromPath(const std::string& game_path);
 void DownloadPatchesForGame(const std::string& title_id,
                             const std::string& dest_folder,
                             std::function<void(bool, std::string)> callback);
