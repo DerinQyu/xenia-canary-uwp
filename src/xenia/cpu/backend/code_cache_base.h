@@ -28,6 +28,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
+#include "xenia/base/platform.h"
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/function.h"
 
@@ -86,6 +87,10 @@ class CodeCacheBase : public CodeCache {
   ~CodeCacheBase() override {
     if (indirection_table_base_) {
       xe::memory::DeallocFixed(indirection_table_base_, kIndirectionTableSize,
+                               xe::memory::DeallocationType::kRelease);
+    }
+    if (generated_code_private_ && generated_code_execute_base_) {
+      xe::memory::DeallocFixed(generated_code_execute_base_, 0,
                                xe::memory::DeallocationType::kRelease);
     }
     if (mapping_ != xe::memory::kFileMappingHandleInvalid) {
@@ -306,6 +311,8 @@ class CodeCacheBase : public CodeCache {
   static const uintptr_t kGeneratedCodeWriteBase =
       kGeneratedCodeExecuteBase + kGeneratedCodeSize + 1;
   static constexpr size_t kMaximumFunctionCount = 1000000;
+  // Translated code memory is committed in steps of this size.
+  static constexpr size_t kGeneratedCodeCommitStep = size_t(16) << 20;
 
   struct UnwindReservation {
     size_t data_size = 0;
@@ -328,6 +335,19 @@ class CodeCacheBase : public CodeCache {
           static_cast<uint64_t>(kIndirectionTableBase),
           kIndirectionTableBase + kIndirectionTableSize);
     }
+
+#if XE_PLATFORM_WINRT
+    // On an Xbox Series S, memory from page file backed mappings (guest
+    // memory, and translated code when it is mapped) was refused at about
+    // 700 MiB together, while private memory had gigabytes left. With one
+    // writable and executable view nothing needs the code mapped twice, so
+    // keep it in private memory there.
+    if (xe::memory::IsWritableExecutableMemoryPreferred() &&
+        InitializePrivateCode()) {
+      generated_code_map_.reserve(kMaximumFunctionCount);
+      return true;
+    }
+#endif
 
     file_name_ =
         fmt::format("xenia_code_cache_{}", Clock::QueryHostTickCount());
@@ -381,6 +401,42 @@ class CodeCacheBase : public CodeCache {
     return true;
   }
 
+  // Reserves the code range as private memory and commits its first step,
+  // so a system that refuses executable private memory is found here, with
+  // the mapping still to fall back on.
+  bool InitializePrivateCode() {
+    auto base = static_cast<uint8_t*>(xe::memory::AllocFixed(
+        reinterpret_cast<void*>(kGeneratedCodeExecuteBase), kGeneratedCodeSize,
+        xe::memory::AllocationType::kReserve,
+        xe::memory::PageAccess::kExecuteReadWrite));
+    if (!base) {
+      XELOGW(
+          "Code cache: could not reserve private memory at {:X} (system "
+          "error {}), so translated code is mapped",
+          uint64_t(kGeneratedCodeExecuteBase),
+          xe::memory::LastAllocationError());
+      return false;
+    }
+    if (!xe::memory::AllocFixed(base, kGeneratedCodeCommitStep,
+                                xe::memory::AllocationType::kCommit,
+                                xe::memory::PageAccess::kExecuteReadWrite)) {
+      const uint32_t error = xe::memory::LastAllocationError();
+      xe::memory::DeallocFixed(base, 0, xe::memory::DeallocationType::kRelease);
+      XELOGW(
+          "Code cache: could not commit executable private memory (system "
+          "error {}), so translated code is mapped",
+          error);
+      return false;
+    }
+    generated_code_execute_base_ = base;
+    generated_code_write_base_ = base;
+    generated_code_private_ = true;
+    generated_code_commit_mark_ = kGeneratedCodeCommitStep;
+    XELOGI("Code cache: {} MiB of private memory for translated code",
+           kGeneratedCodeCommitStep >> 20);
+    return true;
+  }
+
   // Default no-op for the OnCodePlaced hook.
   void OnCodePlaced(uint32_t guest_address, GuestFunction* function_info,
                     void* code_execute_address, size_t code_size) {}
@@ -393,6 +449,8 @@ class CodeCacheBase : public CodeCache {
   uint8_t* indirection_table_base_ = nullptr;
   uint8_t* generated_code_execute_base_ = nullptr;
   uint8_t* generated_code_write_base_ = nullptr;
+  // Whether the code range is private memory rather than a mapping's view.
+  bool generated_code_private_ = false;
   size_t generated_code_offset_ = 0;
   std::atomic<size_t> generated_code_commit_mark_ = {0};
   std::vector<std::pair<uint64_t, GuestFunction*>> generated_code_map_;
@@ -401,8 +459,7 @@ class CodeCacheBase : public CodeCache {
   Derived& self() { return static_cast<Derived&>(*this); }
 
   void EnsureCommitted(size_t high_mark) {
-    using namespace xe::literals;
-    constexpr size_t kCommitStep = 16_MiB;
+    constexpr size_t kCommitStep = kGeneratedCodeCommitStep;
     while (true) {
       size_t old_commit_mark = generated_code_commit_mark_;
       if (high_mark <= old_commit_mark) {

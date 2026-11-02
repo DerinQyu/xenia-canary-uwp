@@ -83,7 +83,9 @@ Config:
   So on the Xbox `commit_all_physical_memory` (`[Memory]`) is off: Xenia gets
   guest physical memory as games allocate it, and gives a page memory when
   the GPU or a game first touches one no game allocated, instead of taking
-  all 512 MiB at start.
+  all 512 MiB at start. Translated code is kept in private memory there,
+  which that limit does not cover (`Code cache: 16 MiB of private memory`
+  in the log; a mapping as before if the system refuses).
 
 ## Building
 
