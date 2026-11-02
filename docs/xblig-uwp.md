@@ -25,7 +25,8 @@ Club packages) in the UWP app for Xbox One / Series consoles in Developer Mode.
     and in an `XNA` folder next to the indie game package, not only in the
     working directory (read only on UWP).
   - The game library lists indie game packages (marketplace content owned by
-    584E07D2 or 584E07D1).
+    584E07D2 or 584E07D1), and leaves out `Xna_TitleLauncher.xex`, which
+    only runs with one of them.
   - Own package identity (`XeniaXBLIG.Experimental`, publisher
     `CN=XeniaXBLIG`, protocol `xeniaxblig:`) so it installs beside other Xenia
     builds and keeps its own LocalState.

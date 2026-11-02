@@ -61,7 +61,8 @@ class GameScanner {
         try {
           switch (classifier_(entry.path())) {
             case GameFileKind::kXex:
-              if (IsExecutable(entry.path())) {
+              if (!IsXnaTitleLauncher(entry.path()) &&
+                  IsExecutable(entry.path())) {
                 executables.push_back(entry.path());
               }
               break;
@@ -139,6 +140,12 @@ class GameScanner {
     file.clear();
     file.seekg(offset);
     return bool(file.read(reinterpret_cast<char*>(&value), sizeof(value)));
+  }
+
+  // The XNA title launcher is no game of its own: Xenia starts it with an
+  // indie game package, and finds it by its folder, not through the library.
+  static bool IsXnaTitleLauncher(const std::filesystem::path& path) {
+    return LowerAscii(Utf8(path.filename())) == "xna_titlelauncher.xex";
   }
 
   static bool IsExecutable(const std::filesystem::path& path) {
