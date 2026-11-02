@@ -42,6 +42,7 @@
 #include "xenia/ui/windowed_app_context.h"
 
 #if XE_PLATFORM_WINRT
+#include "xenia-canary-uwp/WinRTKeyboard.h"
 #include "xenia-canary-uwp/XeniaUWP.h"
 #endif
 
@@ -585,6 +586,14 @@ void KeyboardInputDialog::OnDraw(ImGuiIO& io) {
     bool input_submitted =
         ImGui::InputText("##body", text_buffer_.data(), text_buffer_.size(),
                          ImGuiInputTextFlags_EnterReturnsTrue);
+#if XE_PLATFORM_WINRT
+    // On an Xbox there is usually no keyboard but the console's own, which
+    // only comes up when asked for: bring it up when the box opens, and
+    // again whenever the text field is selected.
+    if (first_draw || ImGui::IsItemActivated()) {
+      UWP::ShowKeyboard();
+    }
+#endif
     if (ImGui::BeginPopupContextItem("input_context_menu")) {
       if (ImGui::MenuItem("Paste")) {
         if (ImGui::GetClipboardText() != nullptr) {
