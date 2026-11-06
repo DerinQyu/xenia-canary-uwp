@@ -18,6 +18,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/crash_report.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
@@ -50,7 +51,9 @@ DEFINE_bool(
 DEFINE_int32(
     d3d12_pipeline_creation_threads, -1,
     "Number of threads used for graphics pipeline creation. -1 to calculate "
-    "automatically (75% of logical CPU cores), a positive number to specify "
+    "automatically (75% of logical CPU cores, 2 on the Xbox, where these "
+    "threads also create the pipelines stored for a game when it starts), a "
+    "positive number to specify "
     "the number of threads explicitly (up to the number of logical CPU cores), "
     "0 to disable multithreaded pipeline creation.",
     "D3D12");
@@ -157,8 +160,14 @@ bool PipelineCache::Initialize() {
   if (cvars::d3d12_pipeline_creation_threads != 0) {
     size_t creation_thread_count;
     if (cvars::d3d12_pipeline_creation_threads < 0) {
+#if XE_PLATFORM_WINRT
+      // The console's shader compiler can take hundreds of MiB for one
+      // pipeline, and an Xbox app has 5 GB in all.
+      creation_thread_count = std::min(logical_processor_count, uint32_t(2));
+#else
       creation_thread_count =
           std::max(logical_processor_count * 3 / 4, uint32_t(1));
+#endif
     } else {
       creation_thread_count =
           std::min(uint32_t(cvars::d3d12_pipeline_creation_threads),
@@ -172,6 +181,8 @@ bool PipelineCache::Initialize() {
       creation_threads_.push_back(std::move(creation_thread));
     }
   }
+  XELOGI("Pipeline cache: {} pipeline creation threads, {} logical processors",
+         creation_threads_.size(), logical_processor_count);
   return true;
 }
 
@@ -273,17 +284,25 @@ void PipelineCache::InitializeShaderStorage(
   if (!pipeline_stored_descriptions.empty()) {
     uint64_t pipeline_creation_start_ = xe::Clock::QueryHostTickCount();
 
+    size_t creation_thread_original_count = creation_threads_.size();
+#if XE_PLATFORM_WINRT
+    // Not on the Xbox, where an app has 5 GB in all and the console's shader
+    // compiler can take hundreds of MiB for one pipeline: King Kong's 51
+    // stored pipelines, created on every core at once, used it all up before
+    // the game ran, and the compiler crashed.
+    size_t creation_thread_needed_count = creation_thread_original_count;
+#else
     // Launch additional creation threads to use all cores to create
     // pipelines faster. Will also be using the main thread, so minus 1.
     size_t logical_processor_count = xe::threading::logical_processor_count();
     if (!logical_processor_count) {
       logical_processor_count = 6;
     }
-    size_t creation_thread_original_count = creation_threads_.size();
     size_t creation_thread_needed_count = std::max(
         std::min(pipeline_stored_descriptions.size(), logical_processor_count) -
             size_t(1),
         creation_thread_original_count);
+#endif
     while (creation_threads_.size() < creation_thread_needed_count) {
       size_t creation_thread_index = creation_threads_.size();
       std::unique_ptr<xe::threading::Thread> creation_thread =
@@ -3244,11 +3263,81 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
     state_desc.DepthStencilState.StencilEnable = false;
   }
 
-  // Create the D3D12 pipeline state object.
+  // Create the D3D12 pipeline state object. The driver's shader compiler can
+  // take hundreds of MiB for one pipeline, and on the Xbox it crashes when an
+  // allocation fails (King Kong, with 5 GB for the whole app), so with little
+  // commit left (under 1.5 GiB, until it is over 2 GiB again) pipelines are
+  // created one at a time.
+  constexpr uint64_t kLowCommitHeadroomEnter = uint64_t(1536) << 20;
+  constexpr uint64_t kLowCommitHeadroomLeave = uint64_t(2048) << 20;
+  uint64_t commit_headroom = 0;
+  bool commit_headroom_known = false;
+  {
+    std::unique_lock<std::mutex> lock(creation_memory_mutex_);
+    while (true) {
+      commit_headroom_known =
+          crash_report::QueryCommitHeadroom(commit_headroom);
+      bool low =
+          commit_headroom_known &&
+          commit_headroom < (creation_memory_low_ ? kLowCommitHeadroomLeave
+                                                  : kLowCommitHeadroomEnter);
+      if (low != creation_memory_low_) {
+        creation_memory_low_ = low;
+        if (low) {
+          XELOGW(
+              "Pipeline cache: {} MiB more may be committed, creating "
+              "pipelines one at a time",
+              commit_headroom >> 20);
+        } else {
+          XELOGI(
+              "Pipeline cache: {} MiB more may be committed, creating "
+              "pipelines in parallel again",
+              commit_headroom >> 20);
+        }
+      }
+      if (!low || !creation_memory_active_) {
+        break;
+      }
+      creation_memory_cond_.wait(lock);
+    }
+    ++creation_memory_active_;
+  }
+  uint64_t creation_start = xe::Clock::QueryHostTickCount();
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   ID3D12PipelineState* state;
   HRESULT hr =
       device->CreateGraphicsPipelineState(&state_desc, IID_PPV_ARGS(&state));
+  uint64_t creation_ms = (xe::Clock::QueryHostTickCount() - creation_start) *
+                         1000 / xe::Clock::QueryHostTickFrequency();
+  {
+    std::lock_guard<std::mutex> lock(creation_memory_mutex_);
+    --creation_memory_active_;
+  }
+  creation_memory_cond_.notify_all();
+  // Name what is slow to create, and how much commit is left after it.
+  if (creation_ms >= 1000) {
+    uint64_t headroom_after = 0;
+    if (commit_headroom_known &&
+        crash_report::QueryCommitHeadroom(headroom_after)) {
+      XELOGW(
+          "Pipeline cache: the pipeline with VS {:016X}, PS {:016X} took {} "
+          "ms to create; {} MiB more may be committed ({} MiB before)",
+          runtime_description.vertex_shader->shader().ucode_data_hash(),
+          runtime_description.pixel_shader
+              ? runtime_description.pixel_shader->shader().ucode_data_hash()
+              : 0,
+          creation_ms, headroom_after >> 20, commit_headroom >> 20);
+    } else {
+      XELOGW(
+          "Pipeline cache: the pipeline with VS {:016X}, PS {:016X} took {} "
+          "ms to create",
+          runtime_description.vertex_shader->shader().ucode_data_hash(),
+          runtime_description.pixel_shader
+              ? runtime_description.pixel_shader->shader().ucode_data_hash()
+              : 0,
+          creation_ms);
+    }
+  }
   if (FAILED(hr)) {
     if (runtime_description.pixel_shader != nullptr) {
       XELOGE(

@@ -32,6 +32,7 @@ void AddStatusSource(StatusSource, void*) {}
 void RemoveStatusSource(StatusSource, void*) {}
 void DescribeStatus(Writer&) {}
 void DescribeMemoryLimits(Writer&) {}
+bool QueryCommitHeadroom(uint64_t&) { return false; }
 
 }  // namespace crash_report
 }  // namespace xe

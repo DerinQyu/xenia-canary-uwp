@@ -105,6 +105,9 @@ void DescribeStatus(Writer& out);
 // Appends the memory limits that apply to the process: its job's, its own
 // commit limit and the system's.
 void DescribeMemoryLimits(Writer& out);
+// What the process may still commit (on the Xbox, what is left of the app's
+// limit), as status lines say "N MiB more may be committed". False if unknown.
+bool QueryCommitHeadroom(uint64_t& bytes);
 
 // Logs the calling thread's host stack with `reason` as the heading, for exits
 // that are not crashes but should say who asked for them.

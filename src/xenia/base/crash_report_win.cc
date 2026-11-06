@@ -1111,6 +1111,16 @@ void DescribeStatus(Writer& out) {
   }
 }
 
+bool QueryCommitHeadroom(uint64_t& bytes) {
+  MEMORYSTATUSEX status = {};
+  status.dwLength = sizeof(status);
+  if (!global_memory_status || !global_memory_status(&status)) {
+    return false;
+  }
+  bytes = status.ullAvailPageFile;
+  return true;
+}
+
 void LogCurrentStack(std::string_view reason) {
   char heading[256];
   CopyString(std::string(reason).c_str(), heading, sizeof(heading));

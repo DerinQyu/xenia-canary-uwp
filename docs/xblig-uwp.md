@@ -93,6 +93,14 @@ Config:
   mapping. Heartbeats and crash reports say how much guest memory comes
   from each (`guest memory ... MiB from the shared mapping, ... MiB
   private`).
+- The console's shader compiler can take hundreds of MiB for one pipeline,
+  and crashes when it gets no more (King Kong: 51 stored pipelines created
+  on every core at once took the app's 5 GB before the game ran). So on the
+  Xbox pipelines are created on 2 threads by default
+  (`d3d12_pipeline_creation_threads`), the stored ones Xenia creates when a
+  game starts too, and one at a time while less than 1.5 GiB of commit is
+  left (`creating pipelines one at a time` in the log). The log names
+  pipelines that take a second or more to create.
 
 ## Building
 

@@ -464,6 +464,17 @@ class PipelineCache {
   // creation_request_cond_ when set.
   size_t creation_threads_shutdown_from_ = SIZE_MAX;
   std::vector<std::unique_ptr<xe::threading::Thread>> creation_threads_;
+
+  // The driver's shader compiler crashes when it runs out of memory, so with
+  // little commit left pipelines are created one at a time (see
+  // CreateD3D12Pipeline).
+  std::mutex creation_memory_mutex_;
+  std::condition_variable creation_memory_cond_;
+  // Pipelines being created now. Protected with creation_memory_mutex_.
+  uint32_t creation_memory_active_ = 0;
+  // Whether the last check found little commit left, to log changes.
+  // Protected with creation_memory_mutex_.
+  bool creation_memory_low_ = false;
 };
 inline bool PipelineCache::PipelineDescription::operator==(
     const PipelineDescription& other) const {
