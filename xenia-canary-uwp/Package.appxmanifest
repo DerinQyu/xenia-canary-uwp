@@ -3,10 +3,10 @@
   <Identity
     Name="XeniaXBLIG.Experimental"
     Publisher="CN=XeniaXBLIG"
-    Version="0.6.0.13" />
+    Version="0.7.0" />
   <mp:PhoneIdentity PhoneProductId="999ab91c-3886-4ff4-96e2-2e4a2c5a61be" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
   <Properties>
-    <DisplayName>Xenia XBLIG</DisplayName>
+    <DisplayName>Xenia for Series S</DisplayName>
     <PublisherDisplayName>Local build</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -40,7 +40,7 @@
         </uap:Extension>
         <uap:Extension Category="windows.protocol">
           <uap:Protocol Name="xeniaxblig">
-            <uap:DisplayName>Xenia XBLIG</uap:DisplayName>
+            <uap:DisplayName>Xenia for Series S</uap:DisplayName>
           </uap:Protocol>
         </uap:Extension>
       </Extensions>
