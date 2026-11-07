@@ -5,7 +5,7 @@ name: Xbox UWP build
 
 on:
   push:
-    branches: [harms-way-fix]
+    branches: [xblig-netplay]
   workflow_dispatch:
 
 jobs:
@@ -83,6 +83,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: xenia-canary-uwp-jump-fix
+          name: xenia-canary-uwp-series-s-fixes
           path: out\**
           if-no-files-found: error
