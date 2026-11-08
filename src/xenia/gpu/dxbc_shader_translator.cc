@@ -3395,7 +3395,7 @@ void DxbcShaderTranslator::WriteOutputSignature() {
         depth.mask = 0b0001;
         depth.never_writes_mask = 0b1110;
       }
-
+                
       // Semantic names.
       uint32_t semantic_offset =
           uint32_t((shader_object_.size() - blob_position) * sizeof(uint32_t));
