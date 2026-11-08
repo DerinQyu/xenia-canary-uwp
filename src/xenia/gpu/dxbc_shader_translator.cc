@@ -3795,7 +3795,8 @@ void DxbcShaderTranslator::WriteShaderCode() {
       }
       // Coverage output for alpha to mask.
       if ((color_targets_written & 0b1) &&
-          !global_flag_force_early_depth_stencil) {
+          !global_flag_force_early_depth_stencil &&
+          !IsCoverageOutputSkippedForDepth()) {
         ao_.OpDclOutput(dxbc::Dest::OMask());
       }
       // Depth output.
