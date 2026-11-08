@@ -2174,7 +2174,8 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMaskSample(
 void DxbcShaderTranslator::CompletePixelShader_AlphaToMask() {
   // Check if alpha to coverage can be done at all in this shader.
   if (!current_shader().writes_color_target(0) ||
-      IsForceEarlyDepthStencilGlobalFlagEnabled()) {
+      IsForceEarlyDepthStencilGlobalFlagEnabled() ||
+      IsCoverageOutputSkippedForDepth()) {
     return;
   }
 
