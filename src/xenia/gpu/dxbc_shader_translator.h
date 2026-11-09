@@ -958,6 +958,14 @@ class DxbcShaderTranslator : public ShaderTranslator {
   void CloseInstructionPredication();
   // counts_towards_guard counts the jump against the control flow guard.
   void JumpToLabel(uint32_t address, bool counts_towards_guard = false);
+  // Structured forward jumps: instead of `pc = target; continue;` (a back edge
+  // to the main loop), code after a forward jump in the same label block is
+  // wrapped in `if (pc <= current label)`. Some drivers (Xbox Series) crash
+  // compiling big shaders with many `continue`s.
+  bool UseStructuredForwardJumps() const;
+  void CloseForwardJumpGuards();
+  uint32_t current_label_ = 0;
+  uint32_t forward_jump_guards_ = 0;
 
   uint32_t FindOrAddTextureBinding(uint32_t fetch_constant,
                                    xenos::FetchOpDimension dimension,
